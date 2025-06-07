@@ -1,7 +1,7 @@
 class Config:
     # Model configuration
-    INTENT_MODEL = "gemma2:2b"
-    CODE_MODEL = "gemma2:2b"
+    CODE_MODEL = "tinyllama:1.1b"    
+    INTENT_MODEL = "phi:2.7b"  
     
     # Execution settings
     TIMEOUT = 30

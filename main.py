@@ -26,7 +26,6 @@ class AgenticExecutor:
         self._reset_state()
         
         tasks = self._break_down_request(user_request)
-        print(tasks)
         if not tasks:
             return {'success': False, 'error': 'Failed to break down request into tasks'}
         
@@ -66,20 +65,22 @@ Each task should be a clear, actionable step that can be coded. Think about:
 - What files need to be created/read
 - How results from one task feed into the next
 
-Return as JSON array in this format:
+IMPORTANT: Return ONLY a valid JSON array, nothing else. No explanations, no markdown, just the JSON.
+
+Format:
 [
   {{
     "description": "Brief description of what this task does",
     "goal": "Specific goal that can be accomplished with Python code",
-    "context_variables": ["variable1", "variable2"] // variables from previous tasks this needs
+    "context_variables": ["variable1", "variable2"]
   }}
 ]
 
-Example for "search tesla news and create poem":
+Example:
 [
   {{
     "description": "Search web for Tesla stock news",
-    "goal": "Use web scraping/API to get latest Tesla stock news and store in 'tesla_news' variable",
+    "goal": "Use web scraping to get latest Tesla stock news and store in 'tesla_news' variable",
     "context_variables": []
   }},
   {{
@@ -94,31 +95,41 @@ Example for "search tesla news and create poem":
   }}
 ]
 
-Return ONLY the JSON array:"""
+JSON array:"""
 
         try:
             response = ollama.chat(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}]
             )
-            print(response['message']['content'])
-            tasks_json = self._extract_json(response['message']['content'])
+            
+            response_text = response['message']['content'].strip()
+            print(f"🔍 AI Response: {response_text[:300]}...")
+            
+            tasks_json = self._extract_json(response_text)
+            
             if not tasks_json:
-                return []
+                raise Exception("Failed to extract valid JSON from AI response")
+            
+            print(f"✅ Successfully parsed {len(tasks_json)} tasks")
             
             tasks = []
-            for task_data in tasks_json:
-                task = AgenticTask(
-                    description=task_data['description'],
-                    goal=task_data['goal'],
-                    context_variables=task_data.get('context_variables', [])
-                )
-                tasks.append(task)
+            for i, task_data in enumerate(tasks_json):
+                try:
+                    task = AgenticTask(
+                        description=task_data.get('description', f'Task {i+1}'),
+                        goal=task_data.get('goal', f'Complete task {i+1}'),
+                        context_variables=task_data.get('context_variables', [])
+                    )
+                    tasks.append(task)
+                except Exception as e:
+                    print(f"⚠️ Error parsing task {i+1}: {e}")
+                    continue
             
             return tasks
             
         except Exception as e:
-            print(f"Error breaking down request: {e}")
+            print(f"Error in _break_down_request: {e}")
             return []
     
     def _execute_task(self, task: AgenticTask, task_number: int) -> dict:
@@ -130,7 +141,7 @@ Return ONLY the JSON array:"""
         
         if result['success']:
             output = result['output']
-            self._extract_variables_from_output(output, task_number)
+            self._extract_variables_from_output(output, task_number, task)
             
             self.execution_log.append({
                 'task_number': task_number,
@@ -186,7 +197,7 @@ Make sure to print variables that might be needed for subsequent tasks."""
 
         return prompt
     
-    def _extract_variables_from_output(self, output: str, task_number: int):
+    def _extract_variables_from_output(self, output: str, task_number: int, task: AgenticTask):
         lines = output.split('\n')
         
         for line in lines:
@@ -232,11 +243,10 @@ Make sure to print variables that might be needed for subsequent tasks."""
         # Remove common AI response prefixes
         text = re.sub(r'^(Sure!|Here\'s|Here is|Here are).*?[\n:]', '', text, flags=re.IGNORECASE)
         
-        # Strategy 1: Try to extract from code blocks
+        # Try to extract from code blocks first
         code_block_patterns = [
             r'```json\s*(.*?)\s*```',
-            r'```\s*(.*?)\s*```',
-            r'`\s*(.*?)\s*`'
+            r'```\s*(.*?)\s*```'
         ]
         
         for pattern in code_block_patterns:
@@ -249,80 +259,25 @@ Make sure to print variables that might be needed for subsequent tasks."""
                 except:
                     continue
         
-        # Strategy 2: Find JSON arrays with better regex
-        json_patterns = [
-            r'\[\s*\{.*?\}\s*\]',  # Complete array with objects
-            r'\[[\s\S]*?\]',       # Any array content
-        ]
+        # Try to find JSON arrays
+        json_match = re.search(r'\[\s*\{.*?\}\s*\]', text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(0))
+            except:
+                pass
         
-        for pattern in json_patterns:
-            matches = re.findall(pattern, text, re.DOTALL)
-            for match in matches:
-                try:
-                    # Clean up the match
-                    cleaned = match.strip()
-                    
-                    # Balance brackets if needed
-                    open_brackets = cleaned.count('[')
-                    close_brackets = cleaned.count(']')
-                    if open_brackets > close_brackets:
-                        cleaned += ']' * (open_brackets - close_brackets)
-                    
-                    result = json.loads(cleaned)
-                    if isinstance(result, list) and len(result) > 0:
-                        return result
-                except json.JSONDecodeError as e:
-                    print(f"JSON parse error: {e}")
-                    continue
-                except Exception as e:
-                    print(f"Other error: {e}")
-                    continue
-        
-        # Strategy 3: Try to parse the entire text
-        try:
-            text_cleaned = text.strip()
-            if text_cleaned.startswith('[') and text_cleaned.endswith(']'):
+        # Try parsing the entire text if it looks like JSON
+        text_cleaned = text.strip()
+        if text_cleaned.startswith('[') and text_cleaned.endswith(']'):
+            try:
                 return json.loads(text_cleaned)
-        except:
-            pass
+            except:
+                pass
         
-        # Strategy 4: Last resort - try to fix common JSON issues
-        try:
-            # Fix common issues
-            fixed_text = text.strip()
-            
-            # Remove trailing commas
-            fixed_text = re.sub(r',\s*}', '}', fixed_text)
-            fixed_text = re.sub(r',\s*]', ']', fixed_text)
-            
-            # Fix unquoted keys
-            fixed_text = re.sub(r'(\w+):', r'"\1":', fixed_text)
-            
-            # Try to find and extract just the array part
-            start_idx = fixed_text.find('[')
-            if start_idx != -1:
-                bracket_count = 0
-                end_idx = start_idx
-                
-                for i in range(start_idx, len(fixed_text)):
-                    if fixed_text[i] == '[':
-                        bracket_count += 1
-                    elif fixed_text[i] == ']':
-                        bracket_count -= 1
-                        if bracket_count == 0:
-                            end_idx = i
-                            break
-                
-                if bracket_count == 0:
-                    json_str = fixed_text[start_idx:end_idx + 1]
-                    result = json.loads(json_str)
-                    if isinstance(result, list):
-                        return result
-        except Exception as e:
-            print(f"Final parsing attempt failed: {e}")
-        
-        print(f"❌ Could not extract JSON from response. Text preview: {text[:200]}...")
+        print(f"❌ Could not extract JSON from response. Text: {text[:200]}...")
         return None
+    
     def _reset_state(self):
         self.context.clear()
         self.execution_log.clear()
@@ -335,7 +290,7 @@ Make sure to print variables that might be needed for subsequent tasks."""
             'total_tasks': len(self.execution_log)
         }
 
-if __name__ == "__main__":
+def main():
     executor = AgenticExecutor()
     
     test_requests = [
@@ -359,3 +314,20 @@ if __name__ == "__main__":
             print(f"\n❌ FAILED: {result['error']}")
         
         print(f"\nExecution log: {len(executor.execution_log)} tasks completed")
+
+if __name__ == "__main__":
+    # Simple usage example
+    executor = AgenticExecutor()
+    
+    user_request = input("Enter your request: ")
+    result = executor.execute(user_request)
+    
+    if result['success']:
+        print(f"\n🎉 All tasks completed successfully!")
+        if 'final_context' in result:
+            print("\n📊 Generated data:")
+            for key, value in result['final_context'].items():
+                preview = str(value)[:100] + "..." if len(str(value)) > 100 else str(value)
+                print(f"  {key}: {preview}")
+    else:
+        print(f"\n❌ Execution failed: {result['error']}")
