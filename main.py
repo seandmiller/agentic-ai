@@ -26,6 +26,7 @@ class AgenticExecutor:
         self._reset_state()
         
         tasks = self._break_down_request(user_request)
+        print(tasks)
         if not tasks:
             return {'success': False, 'error': 'Failed to break down request into tasks'}
         
@@ -100,7 +101,7 @@ Return ONLY the JSON array:"""
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}]
             )
-            
+            print(response['message']['content'])
             tasks_json = self._extract_json(response['message']['content'])
             if not tasks_json:
                 return []
@@ -225,14 +226,103 @@ Make sure to print variables that might be needed for subsequent tasks."""
                     break
     
     def _extract_json(self, text: str) -> Optional[List[Dict]]:
-        try:
-            json_match = re.search(r'\[.*?\]', text, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group(0))
-            return json.loads(text)
-        except:
+        if not text.strip():
             return None
-    
+        
+        # Remove common AI response prefixes
+        text = re.sub(r'^(Sure!|Here\'s|Here is|Here are).*?[\n:]', '', text, flags=re.IGNORECASE)
+        
+        # Strategy 1: Try to extract from code blocks
+        code_block_patterns = [
+            r'```json\s*(.*?)\s*```',
+            r'```\s*(.*?)\s*```',
+            r'`\s*(.*?)\s*`'
+        ]
+        
+        for pattern in code_block_patterns:
+            matches = re.findall(pattern, text, re.DOTALL)
+            for match in matches:
+                try:
+                    result = json.loads(match.strip())
+                    if isinstance(result, list):
+                        return result
+                except:
+                    continue
+        
+        # Strategy 2: Find JSON arrays with better regex
+        json_patterns = [
+            r'\[\s*\{.*?\}\s*\]',  # Complete array with objects
+            r'\[[\s\S]*?\]',       # Any array content
+        ]
+        
+        for pattern in json_patterns:
+            matches = re.findall(pattern, text, re.DOTALL)
+            for match in matches:
+                try:
+                    # Clean up the match
+                    cleaned = match.strip()
+                    
+                    # Balance brackets if needed
+                    open_brackets = cleaned.count('[')
+                    close_brackets = cleaned.count(']')
+                    if open_brackets > close_brackets:
+                        cleaned += ']' * (open_brackets - close_brackets)
+                    
+                    result = json.loads(cleaned)
+                    if isinstance(result, list) and len(result) > 0:
+                        return result
+                except json.JSONDecodeError as e:
+                    print(f"JSON parse error: {e}")
+                    continue
+                except Exception as e:
+                    print(f"Other error: {e}")
+                    continue
+        
+        # Strategy 3: Try to parse the entire text
+        try:
+            text_cleaned = text.strip()
+            if text_cleaned.startswith('[') and text_cleaned.endswith(']'):
+                return json.loads(text_cleaned)
+        except:
+            pass
+        
+        # Strategy 4: Last resort - try to fix common JSON issues
+        try:
+            # Fix common issues
+            fixed_text = text.strip()
+            
+            # Remove trailing commas
+            fixed_text = re.sub(r',\s*}', '}', fixed_text)
+            fixed_text = re.sub(r',\s*]', ']', fixed_text)
+            
+            # Fix unquoted keys
+            fixed_text = re.sub(r'(\w+):', r'"\1":', fixed_text)
+            
+            # Try to find and extract just the array part
+            start_idx = fixed_text.find('[')
+            if start_idx != -1:
+                bracket_count = 0
+                end_idx = start_idx
+                
+                for i in range(start_idx, len(fixed_text)):
+                    if fixed_text[i] == '[':
+                        bracket_count += 1
+                    elif fixed_text[i] == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            end_idx = i
+                            break
+                
+                if bracket_count == 0:
+                    json_str = fixed_text[start_idx:end_idx + 1]
+                    result = json.loads(json_str)
+                    if isinstance(result, list):
+                        return result
+        except Exception as e:
+            print(f"Final parsing attempt failed: {e}")
+        
+        print(f"❌ Could not extract JSON from response. Text preview: {text[:200]}...")
+        return None
     def _reset_state(self):
         self.context.clear()
         self.execution_log.clear()
