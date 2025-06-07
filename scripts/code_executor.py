@@ -3,159 +3,67 @@ import subprocess
 import tempfile
 import os
 import sys
+import hashlib
 from .config import Config
 
 class CodeExecutor:
+    
     def __init__(self):
         self.model_name = Config.CODE_MODEL
         self.timeout = Config.TIMEOUT
-        self.max_retries = Config.MAX_RETRIES
+        self.max_fix_depth = getattr(Config, 'MAX_FIX_DEPTH', 5)
+        self.fix_history = []
+        self.code_hashes = set()
     
     def generate_and_execute(self, user_request: str) -> dict:
-        """Generate Python code from user request and execute it with error recovery"""
+        print("⚡ Generating initial code...")
+        self._reset_state()
         
-        if Config.SHOW_EXECUTION_STEPS:
-            print("⚡ Generating code...")
-        
-        # Step 1: Generate initial code
-        generated_code = self._generate_code(user_request)
-        if not generated_code:
-            return {
-                'success': False,
-                'output': '',
-                'error': 'Failed to generate code',
-                'code': '',
-                'timeout': False
-            }
+        initial_code = self._generate_code(user_request)
+        if not initial_code:
+            return self._create_error_result('Failed to generate initial code')
         
         if Config.SHOW_GENERATED_CODE:
-            print(f"📝 Code generated:\n{generated_code}")
+            print(f"📝 Initial code:\n{initial_code}")
         
-        if Config.SHOW_EXECUTION_STEPS:
-            print("🔥 Executing...")
-        
-        # Step 2: Try to execute the code
-        result = self._execute_code(generated_code)
-        result['code'] = generated_code
-        
-        # Step 3: If execution failed and auto-fix is enabled, try to fix it
-        retry_count = 0
-        while (Config.ENABLE_AUTO_FIX and not result['success'] and 
-               retry_count < self.max_retries and not result['timeout']):
-            retry_count += 1
-            print(f"❌ Execution failed! Attempting to fix... (Retry {retry_count}/{self.max_retries})")
-            
-            # Generate corrected code based on the error
-            fixed_code = self._fix_code_with_error(user_request, generated_code, result['error'])
-            
-            if not fixed_code or fixed_code == generated_code:
-                print("🤷 AI couldn't generate a fix, stopping retries")
-                break
-            
-            if Config.SHOW_GENERATED_CODE:
-                print(f"🔧 Fixed code generated:\n{fixed_code}")
-            
-            if Config.SHOW_EXECUTION_STEPS:
-                print("🔥 Re-executing...")
-            
-            # Try executing the fixed code
-            new_result = self._execute_code(fixed_code)
-            new_result['code'] = fixed_code
-            
-            if new_result['success']:
-                print(f"✅ Fixed successfully on retry {retry_count}!")
-                return new_result
-            else:
-                print(f"❌ Fix attempt {retry_count} failed")
-                result = new_result  # Update result for next iteration
-                generated_code = fixed_code  # Update code for next iteration
-        
-        return result
+        return self._execute_with_recursive_fixes(user_request, initial_code, depth=0)
     
-    def _generate_code(self, user_request: str) -> str:
-        """Generate Python code based on user request"""
+    def _execute_with_recursive_fixes(self, original_request: str, code: str, depth: int = 0) -> dict:
+        indent = "  " * depth
+        print(f"{indent}🔥 Executing (depth {depth})...")
         
-        prompt = f"""Generate Python code to solve: "{user_request}"
-
-CRITICAL RULES:
-- Return ONLY executable Python code
-- NO explanations, NO markdown, NO comments outside code
-- Start directly with Python statements
-- Include print() to show results
-- Use standard library imports as needed
-AGAIN do not generate any comments  Your output is going directly in a python file to be executed
-Request: {user_request}
-
-Python code:"""
-
-        try:
-            response = ollama.chat(
-                model=self.model_name,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            
-            code = response['message']['content'].strip()
-            
-            # Aggressive cleaning to extract only code
-            lines = code.split('\n')
-            clean_lines = []
-            in_code_block = False
-            
-            for line in lines:
-                # Skip explanatory text before code
-                if line.strip().startswith('```python'):
-                    in_code_block = True
-                    continue
-                elif line.strip() == '```':
-                    if in_code_block:
-                        break  # End of code block
-                    continue
-                elif line.strip().startswith('```'):
-                    continue
-                
-                # If we haven't found a code block, look for actual Python code
-                if not in_code_block:
-                    # Skip lines that look like explanations
-                    if (line.strip().startswith(('Sure!', 'Here', 'This', 'Note:', 'Please')) or
-                        'python program' in line.lower() or
-                        len(line.strip()) > 100):  # Very long lines are likely explanations
-                        continue
-                    # If line looks like Python code, start collecting
-                    if (line.strip() and 
-                        (line.strip()[0].isalpha() or line.strip().startswith(('#', 'def ', 'import ', 'from ', 'print', 'for ', 'if ', 'while ')))):
-                        in_code_block = True
-                
-                if in_code_block:
-                    clean_lines.append(line)
-            
-            clean_code = '\n'.join(clean_lines).strip()
-            
-            # Final check - if still contains explanatory text, try to extract just the essentials
-            if 'Sure!' in clean_code or 'Here is' in clean_code:
-                # Try to find and extract just function definitions and executable statements
-                final_lines = []
-                for line in clean_code.split('\n'):
-                    line = line.strip()
-                    if (line and not line.startswith('#') and 
-                        (line.startswith(('def ', 'import ', 'from ', 'print', 'for ', 'if ', 'while ', 'return')) or
-                         '=' in line or line.endswith(':'))):
-                        final_lines.append(line)
-                clean_code = '\n'.join(final_lines)
-            
-            return clean_code if clean_code else ""
-            
-        except Exception as e:
-            print(f"Error generating code: {e}")
-            return ""
+        result = self._execute_code(code)
+        result.update({'code': code, 'fix_attempts': depth})
+        
+        if result['success']:
+            self._print_success_message(indent, depth)
+            return result
+        
+        if not self._should_attempt_fix(depth, result):
+            return self._handle_max_depth_reached(result, depth, indent)
+        
+        print(f"{indent}❌ Execution failed! Attempting recursive fix #{depth + 1}...")
+        
+        fixed_code = self._generate_recursive_fix(original_request, code, result['error'], depth)
+        
+        if not self._is_valid_fix(fixed_code, code, indent, depth):
+            return self._handle_invalid_fix(result, depth)
+        
+        self._record_fix_attempt(depth, code, fixed_code, result['error'])
+        
+        if Config.SHOW_GENERATED_CODE:
+            print(f"{indent}🔧 Fixed code (attempt {depth + 1}):\n{fixed_code}")
+        
+        return self._execute_with_recursive_fixes(original_request, fixed_code, depth + 1)
     
-    def _fix_code_with_error(self, original_request: str, failed_code: str, error_message: str) -> str:
-        """Generate corrected code based on the error"""
+    def _generate_recursive_fix(self, original_request: str, failed_code: str, error_message: str, depth: int) -> str:
+        fix_context = self._build_fix_context()
         
-        prompt = f"""The following Python code failed to execute. Fix the error and return corrected code.
+        prompt = f"""Fix this Python code that failed to execute. This is recursive fix attempt #{depth + 1}.
 
 ORIGINAL REQUEST: "{original_request}"
 
-FAILED CODE:
+CURRENT FAILED CODE:
 ```python
 {failed_code}
 ```
@@ -163,12 +71,17 @@ FAILED CODE:
 ERROR MESSAGE:
 {error_message}
 
-INSTRUCTIONS:
-- Analyze the error and fix the issue
-- Return ONLY the corrected Python code
-- Include ALL necessary imports
-- Keep the same functionality as requested
-- NO explanations, just working code
+PREVIOUS FIX ATTEMPTS:
+{fix_context}
+
+INSTRUCTIONS FOR RECURSIVE FIXING:
+1. Analyze the specific error carefully
+2. Learn from previous fix attempts (if any) 
+3. Consider what didn't work before
+4. Generate a DIFFERENT approach if previous fixes failed
+5. Return ONLY the corrected Python code
+6. Make sure ALL imports are included
+7. Ensure the code addresses the original request
 
 CORRECTED CODE:"""
 
@@ -177,97 +90,138 @@ CORRECTED CODE:"""
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}]
             )
-            
-            code = response['message']['content'].strip()
-            
-            # Clean up the code same as before
-            lines = code.split('\n')
-            clean_lines = []
-            in_code_block = False
-            
-            for line in lines:
-                if line.strip().startswith('```python'):
-                    in_code_block = True
-                    continue
-                elif line.strip() == '```':
-                    if in_code_block:
-                        break
-                    continue
-                elif line.strip().startswith('```'):
-                    continue
-                
-                if not in_code_block:
-                    if (line.strip().startswith(('Sure!', 'Here', 'This', 'Note:', 'Please')) or
-                        'python program' in line.lower() or
-                        len(line.strip()) > 100):
-                        continue
-                    if (line.strip() and 
-                        (line.strip()[0].isalpha() or line.strip().startswith(('#', 'def ', 'import ', 'from ', 'print', 'for ', 'if ', 'while ')))):
-                        in_code_block = True
-                
-                if in_code_block:
-                    clean_lines.append(line)
-            
-            clean_code = '\n'.join(clean_lines).strip()
-            
-            if 'Sure!' in clean_code or 'Here is' in clean_code:
-                final_lines = []
-                for line in clean_code.split('\n'):
-                    line = line.strip()
-                    if (line and not line.startswith('#') and 
-                        (line.startswith(('def ', 'import ', 'from ', 'print', 'for ', 'if ', 'while ', 'return')) or
-                         '=' in line or line.endswith(':'))):
-                        final_lines.append(line)
-                clean_code = '\n'.join(final_lines)
-            
-            return clean_code if clean_code else ""
-            
+            return self._clean_code(response['message']['content'].strip())
         except Exception as e:
-            print(f"Error generating fix: {e}")
+            print(f"Error generating recursive fix: {e}")
             return ""
     
-    def _execute_code(self, code: str) -> dict:
-        """Execute Python code safely"""
+    def _build_fix_context(self) -> str:
+        if not self.fix_history:
+            return "No previous attempts."
         
-        # Create restricted Python code with safety measures
-        safe_code = f'''
-import sys
+        recent_attempts = self.fix_history[-3:]
+        context_parts = []
+        
+        for attempt in recent_attempts:
+            error_preview = attempt['error'][:200] + "..." if len(attempt['error']) > 200 else attempt['error']
+            context_parts.append(f"Attempt {attempt['depth'] + 1}: Error was: {error_preview}")
+        
+        return "\n".join(context_parts)
+    
+    def _is_duplicate_fix(self, new_code: str) -> bool:
+        code_hash = hashlib.md5(new_code.strip().encode()).hexdigest()
+        if code_hash in self.code_hashes:
+            return True
+        self.code_hashes.add(code_hash)
+        return False
+    
+    def _generate_code(self, user_request: str) -> str:
+        prompt = f"""Generate Python code to solve: "{user_request}"
 
-# Restrict memory usage (Windows compatible)
-{f"""try:
-    import resource
-    resource.setrlimit(resource.RLIMIT_AS, ({Config.MEMORY_LIMIT_MB * 1024 * 1024}, {Config.MEMORY_LIMIT_MB * 1024 * 1024}))
-except ImportError:
-    # Windows doesn't have resource module, skip memory limiting
-    pass
-except:
-    pass""" if Config.ENABLE_MEMORY_LIMIT else "# Memory limiting disabled"}
+RULES:
+- Return ONLY executable Python code
+- NO explanations, NO markdown, NO comments
+- Start directly with Python statements
+- Include print() to show results
+- Use standard library imports as needed
 
-# Execute generated code
+Python code:"""
+
+        try:
+            response = ollama.chat(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return self._clean_code(response['message']['content'].strip())
+        except Exception as e:
+            print(f"Error generating initial code: {e}")
+            return ""
+    
+    def _clean_code(self, raw_code: str) -> str:
+        if not raw_code:
+            return ""
+        
+        lines = raw_code.split('\n')
+        clean_lines = []
+        in_code_block = False
+        
+        code_indicators = ('import ', 'from ', 'def ', 'class ', 'print', 'if ', 'for ', 'while ', 'try')
+        skip_phrases = ('Sure!', 'Here', 'This', 'Note:', 'Let me', 'I will')
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            if stripped.startswith('```python'):
+                in_code_block = True
+                continue
+            elif stripped == '```' and in_code_block:
+                break
+            elif stripped.startswith('```'):
+                continue
+            
+            if not in_code_block:
+                if any(stripped.startswith(phrase) for phrase in skip_phrases):
+                    continue
+                if 'python' in stripped.lower() and len(stripped) > 50:
+                    continue
+                if stripped and (stripped[0].isalpha() or stripped.startswith(code_indicators)):
+                    in_code_block = True
+            
+            if in_code_block and line:
+                clean_lines.append(line)
+        
+        cleaned = '\n'.join(clean_lines).strip()
+        
+        if any(phrase in cleaned for phrase in skip_phrases):
+            essential_lines = [
+                line for line in cleaned.split('\n')
+                if line.strip() and not line.strip().startswith('#') and (
+                    line.strip().startswith(code_indicators) or
+                    '=' in line or line.endswith(':') or line.startswith('    ')
+                )
+            ]
+            if essential_lines:
+                cleaned = '\n'.join(essential_lines)
+        
+        return cleaned
+    
+    def _execute_code(self, code: str) -> dict:
+        safe_code = f'''import sys
+import os
+
 try:
 {self._indent_code(code, 4)}
 except Exception as e:
-    print(f"EXECUTION_ERROR: {{e}}")
+    print(f"EXECUTION_ERROR: {{type(e).__name__}}: {{e}}")
+    sys.exit(1)
 '''
         
-        # Write code to temporary file
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
             f.write(safe_code)
             temp_file = f.name
         
         try:
-            # Execute the code
             process = subprocess.run(
                 [sys.executable, temp_file],
                 capture_output=True,
                 text=True,
-                timeout=self.timeout
+                timeout=self.timeout,
+                cwd=os.getcwd()
             )
             
+            success = process.returncode == 0
+            error_output = process.stderr
+            
+            if "EXECUTION_ERROR:" in process.stdout:
+                success = False
+                error_lines = [line for line in process.stdout.split('\n') if 'EXECUTION_ERROR:' in line]
+                if error_lines and not error_output:
+                    error_output = error_lines[0].replace('EXECUTION_ERROR: ', '')
+            
             return {
-                'success': process.returncode == 0,
+                'success': success,
                 'output': process.stdout,
-                'error': process.stderr,
+                'error': error_output,
                 'timeout': False
             }
             
@@ -282,16 +236,81 @@ except Exception as e:
             return {
                 'success': False,
                 'output': '',
-                'error': str(e),
+                'error': f'Subprocess execution error: {str(e)}',
                 'timeout': False
             }
         finally:
-            # Clean up temp file
-            if os.path.exists(temp_file):
-                os.unlink(temp_file)
+            self._safe_cleanup(temp_file)
     
     def _indent_code(self, code: str, spaces: int) -> str:
-        """Add indentation to code"""
-        lines = code.split('\n')
-        indented_lines = [' ' * spaces + line for line in lines]
-        return '\n'.join(indented_lines)
+        return '\n'.join(' ' * spaces + line for line in code.split('\n'))
+    
+    def _reset_state(self):
+        self.fix_history.clear()
+        self.code_hashes.clear()
+    
+    def _create_error_result(self, error_msg: str) -> dict:
+        return {
+            'success': False,
+            'output': '',
+            'error': error_msg,
+            'code': '',
+            'fix_attempts': 0
+        }
+    
+    def _print_success_message(self, indent: str, depth: int):
+        if depth > 0:
+            print(f"{indent}✅ Fixed successfully after {depth} recursive fix(es)!")
+        else:
+            print(f"{indent}✅ Code executed successfully!")
+    
+    def _should_attempt_fix(self, depth: int, result: dict) -> bool:
+        return depth < self.max_fix_depth and not result.get('timeout', False)
+    
+    def _handle_max_depth_reached(self, result: dict, depth: int, indent: str) -> dict:
+        if depth >= self.max_fix_depth:
+            print(f"{indent}🛑 Reached maximum fix depth ({self.max_fix_depth})")
+            result['error'] += f"\n\nReached maximum recursive fix depth ({self.max_fix_depth})"
+        elif result.get('timeout'):
+            print(f"{indent}⏰ Code execution timed out")
+        return result
+    
+    def _is_valid_fix(self, fixed_code: str, original_code: str, indent: str, depth: int) -> bool:
+        if not fixed_code or fixed_code == original_code:
+            print(f"{indent}🤷 No meaningful fix generated, stopping recursion")
+            return False
+        
+        if self._is_duplicate_fix(fixed_code):
+            print(f"{indent}🔄 Detected duplicate fix attempt, stopping recursion")
+            return False
+        
+        return True
+    
+    def _handle_invalid_fix(self, result: dict, depth: int) -> dict:
+        result['error'] += f"\n\nRecursive fixing stopped at depth {depth} - no improvement found"
+        return result
+    
+    def _record_fix_attempt(self, depth: int, original_code: str, fixed_code: str, error: str):
+        self.fix_history.append({
+            'depth': depth,
+            'original_code': original_code,
+            'fixed_code': fixed_code,
+            'error': error
+        })
+        
+        if len(self.fix_history) > 10:
+            self.fix_history.pop(0)
+    
+    def _safe_cleanup(self, temp_file: str):
+        if os.path.exists(temp_file):
+            try:
+                os.unlink(temp_file)
+            except OSError:
+                pass
+    
+    def get_fix_summary(self) -> dict:
+        return {
+            'total_attempts': len(self.fix_history),
+            'fix_history': self.fix_history,
+            'success_depth': len(self.fix_history)
+        }
