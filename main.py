@@ -3,6 +3,7 @@ import json
 from typing import List, Dict
 from dataclasses import dataclass
 from scripts.code_executor import CodeExecutor
+from scripts.intent_interpreter import IntentInterpreter
 from scripts.config import Config
 
 @dataclass
@@ -16,37 +17,105 @@ class AgenticExecutor:
     def __init__(self):
         self.model_name = getattr(Config, 'INTENT_MODEL', Config.CODE_MODEL)
         self.code_executor = CodeExecutor()
+        self.intent_interpreter = IntentInterpreter()
         self.context = {}
     
     def execute(self, user_request: str) -> dict:
-        print(f"🤖 Executing: {user_request}")
+        print(f"🤖 Processing: {user_request}")
+        
+        # First: Determine if this needs code execution or just conversation
+        intent = self.intent_interpreter.interpret(user_request)
+        print(f"🧠 Intent: {intent}")
+        
+        if intent == "chat":
+            # Handle as regular conversation
+            response = self.intent_interpreter.handle_conversation(user_request)
+            print(f"💬 Chat response provided")
+            return {'success': True, 'message': response, 'type': 'chat'}
+        
+        # It's a code request - determine execution strategy
+        execution_strategy = self.intent_interpreter.determine_execution_strategy(user_request)
+        print(f"📋 Strategy: {execution_strategy}")
+        
+        if execution_strategy == "unified":
+            return self._execute_unified(user_request)
+        else:
+            return self._execute_sequential(user_request)
+    
+
+    def _execute_unified(self, user_request: str) -> dict:
+        """Execute as one comprehensive solution"""
+        print(f"⚡ Unified execution")
+        
+        unified_prompt = self._create_unified_prompt(user_request)
+        result = self.code_executor.generate_and_execute(unified_prompt)
+        
+        if result['success']:
+            print(f"✅ Unified execution completed")
+            self._extract_context(result['output'])
+            return {'success': True, 'message': "Completed unified execution", 'context': self.context, 'type': 'code'}
+        else:
+            return {'success': False, 'error': f"Unified execution failed: {result['error']}", 'type': 'code'}
+    
+    def _execute_sequential(self, user_request: str) -> dict:
+        """Execute as sequential tasks with data passing"""
+        print(f"⚡ Sequential execution")
         
         tasks = self._break_down_request(user_request)
-        print(f"📋 Tasks: {tasks}")
-        
+        print(f"📋 Sequential tasks: {len(tasks)}")
         
         for i, task in enumerate(tasks, 1):
-            print(f"\n⚡ Task {i}: {task.description}")
+            print(f"\n🔗 Step {i}: {task.description}")
             
             result = self._execute_task(task)
             
             if not result['success']:
-                return {'success': False, 'error': f"Task {i} failed: {result['error']}"}
+                return {'success': False, 'error': f"Step {i} failed: {result['error']}", 'type': 'code'}
             
-            print(f"✅ Task {i} completed")
+            print(f"✅ Step {i} completed")
         
-        return {'success': True, 'message': f"Completed {len(tasks)} tasks", 'context': self.context}
+        return {'success': True, 'message': f"Completed {len(tasks)} sequential steps", 'context': self.context, 'type': 'code'}
     
-    def _break_down_request(self, user_request: str) -> List[AgenticTask]:
-        prompt = f'''Break down this request into sequential tasks. Return ONLY the JSON array, nothing else:
+    def _create_unified_prompt(self, user_request: str) -> str:
+        """Create a comprehensive prompt for unified execution"""
+        
+        # Include any existing context
+        context_code = ""
+        if self.context:
+            for var, value in self.context.items():
+                if isinstance(value, str):
+                    context_code += f'{var} = """{value}"""\n'
+                else:
+                    context_code += f'{var} = {repr(value)}\n'
+        
+        return f"""{context_code}
+# Complete Request: {user_request}
 
-"{user_request}"
+# Instructions:
+# - This is a unified task - handle the COMPLETE request in one comprehensive solution
+# - Write a single, cohesive program that accomplishes everything requested
+# - Think through all requirements and implement them together
+# - Include all necessary imports at the top
+# - Store any important final results as variables and print them as:
+#   print(f"RESULT: variable_name = {{variable_name}}")
+# - Write clean, working Python code that fully satisfies the request
+
+# Your comprehensive solution:"""
+
+    def _break_down_request(self, user_request: str) -> List[AgenticTask]:
+        """Break down request into sequential tasks with data passing"""
+        prompt = f'''This request needs sequential execution with data passing between steps.
+Break it down into ordered tasks where later tasks use results from earlier ones.
+
+Request: "{user_request}"
+
+Return ONLY the JSON array:
 
 [
   {{
-    "description": "Brief task description", 
-    "goal": "Specific Python code goal",
-    "context_variables": ["var1", "var2"]
+    "description": "What this step does", 
+    "goal": "Specific Python code goal for this step",
+    "context_variables": ["data_from_previous_steps"]
   }}
 ]'''
 
@@ -64,7 +133,8 @@ class AgenticExecutor:
         ) for task in tasks_json]
     
     def _execute_task(self, task: AgenticTask) -> dict:
-        code_prompt = self._build_prompt(task)
+        """Execute individual task with context from previous steps"""
+        code_prompt = self._build_task_prompt(task)
         result = self.code_executor.generate_and_execute(code_prompt)
         
         if result['success']:
@@ -72,7 +142,8 @@ class AgenticExecutor:
         
         return result
     
-    def _build_prompt(self, task: AgenticTask) -> str:
+    def _build_task_prompt(self, task: AgenticTask) -> str:
+        """Build prompt for individual task with context"""
         context_code = ""
         
         if task.context_variables:
@@ -85,14 +156,19 @@ class AgenticExecutor:
                         context_code += f'{var} = {repr(value)}\n'
         
         return f"""{context_code}
-# Task: {task.goal}
+# Step Goal: {task.goal}
 
-# Important: Store results in variables and print them as:
-# print(f"RESULT: variable_name = {{variable_name}}")
+# Instructions:
+# - Focus ONLY on this specific step
+# - Use any provided context variables from previous steps
+# - Store important results for next steps using:
+#   print(f"RESULT: variable_name = {{variable_name}}")
+# - Keep this step focused and don't try to do everything
 
-# Your code here:"""
+# Your code for this step:"""
     
     def _extract_context(self, output: str):
+        """Extract context variables from execution output"""
         for line in output.split('\n'):
             if 'RESULT:' in line and '=' in line:
                 try:
@@ -100,12 +176,19 @@ class AgenticExecutor:
                     var_name = var_part.split('=', 1)[0].strip()
                     var_value = var_part.split('=', 1)[1].strip()
                     self.context[var_name] = var_value
-                    print(f"📥 {var_name}")
+                    print(f"📥 Stored: {var_name}")
                 except:
                     pass
 
 def main():
     executor = AgenticExecutor()
+    
+    print("🚀 AI Agent Ready - Chat or Code")
+    print("Examples:")
+    print("  💬 Chat: 'What's the weather like?'")
+    print("  🔗 Sequential: 'Search web for Tesla stock and make a poem about it'")
+    print("  ⚡ Unified: 'Create a snake game in Python'")
+    print()
     
     while True:
         request = input("\n> ")
@@ -115,7 +198,10 @@ def main():
         result = executor.execute(request)
         
         if result['success']:
-            print(f"🎉 {result['message']}")
+            if result.get('type') == 'chat':
+                print(f"💬 {result['message']}")
+            else:
+                print(f"🎉 {result['message']}")
         else:
             print(f"❌ {result['error']}")
 
