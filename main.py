@@ -113,7 +113,7 @@ class AgenticExecutor:
         """Break down request into sequential tasks with data passing"""
         prompt = f'''This request needs sequential execution with data passing between steps.
 Break it down into ordered tasks where later tasks use results from earlier ones.
-
+ONLY return json data NO explanations NO other texts or strings in output JUST JSON DATA WE ARE on A windows System
 Request: "{user_request}"
 
 Return ONLY the JSON array:
