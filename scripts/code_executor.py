@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import os
 from .config import Config
+from .tools import CodeExtractor
 
 class CodeExecutor:
     
@@ -13,7 +14,7 @@ class CodeExecutor:
     def generate_and_execute(self, user_request: str) -> dict:
         print("⚡ Generating code...")
         
-        # Generate the Python code
+   
         code = self._generate_code(user_request)
         if not code:
             return {
@@ -30,18 +31,11 @@ class CodeExecutor:
         return self._execute_code(code)
     
     def _generate_code(self, user_request: str) -> str:
-        prompt = f"""Write Python code to accomplish this task: {user_request}
+        prompt = f"""{user_request}
 
-IMPORTANT RULES:
-- Write ONLY executable Python code
-- NO explanations before or after the code
-- NO markdown code blocks
-- Start immediately with import statements or code
-- Include all necessary imports
-- Make the code complete and runnable
-- Add print statements to show results
+Write Python code. Return ONLY executable Python code. No markdown, no explanations, no code blocks.
 
-Code:"""
+Start immediately with imports or code:"""
 
         try:
             response = ollama.chat(
@@ -49,42 +43,20 @@ Code:"""
                 messages=[{"role": "user", "content": prompt}]
             )
             
-            return self._clean_code(response['message']['content'].strip())
+            raw_response = response['message']['content']
+            
+            # Use CodeExtractor to clean the response
+            cleaned_code = CodeExtractor.extract_code(raw_response)
+            
+            if not cleaned_code:
+                print(f"⚠️ No code extracted from AI response: {raw_response[:200]}...")
+                return ""
+            
+            return cleaned_code
             
         except Exception as e:
             print(f"Error generating code: {e}")
             return ""
-    
-    def _clean_code(self, raw_code: str) -> str:
-        if not raw_code:
-            return ""
-        
-        # Remove code blocks if present
-        import re
-        
-        # Try to extract from ```python blocks
-        python_block = re.search(r'```python\s*(.*?)\s*```', raw_code, re.DOTALL)
-        if python_block:
-            return python_block.group(1).strip()
-        
-        # Try to extract from ``` blocks
-        code_block = re.search(r'```\s*(.*?)\s*```', raw_code, re.DOTALL)
-        if code_block:
-            return code_block.group(1).strip()
-        
-        # Remove obvious explanation lines
-        lines = raw_code.split('\n')
-        filtered_lines = []
-        
-        for line in lines:
-            stripped = line.strip()
-            # Skip explanation lines
-            if any(stripped.lower().startswith(phrase) for phrase in 
-                  ['sure', 'here', 'let me', 'i will', 'this code', 'the code']):
-                continue
-            filtered_lines.append(line)
-        
-        return '\n'.join(filtered_lines).strip()
     
     def _execute_code(self, code: str) -> dict:
         # Write the code to a temporary Python file
