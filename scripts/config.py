@@ -4,7 +4,7 @@ class Config:
     INTENT_MODEL = "phi3"  
     
     # Execution settings
-    TIMEOUT = 300000000
+    TIMEOUT = 3000
     MAX_RETRIES = 2  # Legacy setting - kept for compatibility
     MAX_FIX_DEPTH = 5  # NEW: Maximum recursive fix attempts
     

@@ -43,12 +43,14 @@ Sequential approach is needed when:
 - "Search X and then Y" patterns  
 - "Get/fetch/find X and then create/analyze/process Y"
 - External data gathering followed by processing
+- search the web and get the latest information on tesla and use that info to create a poem (sequantial approach needed as u need to get information from the web and then generate content)
 
 Unified approach is needed when:
 - Single cohesive task (games, apps, tools)
 - Creative projects without external dependencies
 - Mathematical/computational problems
 - File processing or data analysis of provided data
+- create a calculator app with a gui  (no need for sequatial task as this is a all in one application)
 
 Respond with only: "sequential" or "unified"
 
