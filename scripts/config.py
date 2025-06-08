@@ -1,7 +1,7 @@
 class Config:
     # Model configuration
-    CODE_MODEL = 'deepseek-coder-v2'    
-    INTENT_MODEL = "phi3"  
+    CODE_MODEL = 'qwen2.5-coder:7b'    
+    INTENT_MODEL = "phi4"  
     
     # Execution settings
     TIMEOUT = 3000
