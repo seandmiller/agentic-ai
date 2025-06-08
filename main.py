@@ -76,7 +76,8 @@ Format:
   }}
 ]
 
-Example:
+
+Example: Get the latest information on Tesla stock and create a poem about it, then save it in a desktop directory
 [
   {{
     "description": "Search web for Tesla stock news",

@@ -1,7 +1,7 @@
 class Config:
     # Model configuration
-    CODE_MODEL = "tinyllama:1.1b"    
-    INTENT_MODEL = "phi:2.7b"  
+    CODE_MODEL = "phi3"    
+    INTENT_MODEL = "phi3"  
     
     # Execution settings
     TIMEOUT = 30
