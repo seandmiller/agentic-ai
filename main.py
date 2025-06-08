@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from scripts.code_executor import CodeExecutor
 from scripts.intent_interpreter import IntentInterpreter
 from scripts.config import Config
+from scripts.tools import JSONExtractor
 
 @dataclass
 class AgenticTask:
@@ -62,6 +63,12 @@ class AgenticExecutor:
         print(f"⚡ Sequential execution")
         
         tasks = self._break_down_request(user_request)
+        
+        # Fallback to unified if task breakdown fails
+        if not tasks:
+            print("🔄 Task breakdown failed, falling back to unified approach")
+            return self._execute_unified(user_request)
+        
         print(f"📋 Sequential tasks: {len(tasks)}")
         
         for i, task in enumerate(tasks, 1):
@@ -124,7 +131,13 @@ Return ONLY the JSON array:
             messages=[{"role": "user", "content": prompt}]
         )
         
-        tasks_json = json.loads(response['message']['content'])
+        print(response['message']['content'])
+        tasks_json = JSONExtractor.extract_json(response['message']['content'])
+        
+        if not tasks_json:
+            print(f"⚠️ Failed to extract JSON from model response: {response['message']['content'][:200]}...")
+            # Return empty list to trigger fallback
+            return []
         
         return [AgenticTask(
             description=task['description'],

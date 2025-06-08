@@ -8,6 +8,10 @@ class IntentInterpreter:
     def interpret(self, user_input: str) -> str:
         """Determine if request needs code execution or conversation"""
         prompt = f"""Does this request need code execution?
+        Example: 
+        -tell me what the current weather is in Foster city California -> Code
+        -How does the sun generate light -> Chat
+                       
 
 Request: "{user_input}"
 
